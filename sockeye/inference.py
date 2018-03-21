@@ -298,6 +298,29 @@ class InferenceModel(model.SockeyeModel):
         decoder_states = [mx.nd.repeat(s, repeats=self.beam_size, axis=0) for s in decoder_states]
         return ModelState(decoder_states)
 
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
     def run_decoder(self,
                     prev_word: mx.nd.NDArray,
                     bucket_key: Tuple[int, int],
@@ -315,6 +338,46 @@ class InferenceModel(model.SockeyeModel):
         self.decoder_module.forward(data_batch=batch, is_train=False)
         out, attention_probs, *model_state.states = self.decoder_module.get_outputs()
         return out, attention_probs, model_state
+        
+        
+    def sym_run_decoder(self,
+                    prev_word: mx.sym.Variable,
+                    bucket_key: Tuple[int, int],
+                    model_state: 'ModelState') -> Tuple[mx.sym.Variable, mx.sym.Variable, 'ModelState']:
+        """
+        Runs forward pass of the single-step decoder.
+
+        :return: Decoder stack output (logit inputs or probability distribution), attention scores, updated model state.
+        """
+        batch = mx.io.DataBatch(
+            data=[prev_word.as_in_context(self.context)] + model_state.states,
+            label=None,
+            bucket_key=bucket_key,
+            provide_data=self._get_decoder_data_shapes(bucket_key))
+        self.decoder_module.forward(data_batch=batch, is_train=False)
+        out, attention_probs, *model_state.states = self.decoder_module.get_outputs()
+        return out, attention_probs, model_state
+        
+        
+        
+        
+        
+        
+        
+        
+        
+        
+        
+        
+        
+        
+        
+        
+        
+        
+        
+        
+        
 
     @property
     def training_max_seq_len_source(self) -> int:
@@ -617,6 +680,25 @@ class LengthPenalty:
             if isinstance(lengths, mx.nd.NDArray):
                 # no length penalty:
                 return mx.nd.ones_like(lengths)
+            else:
+                return 1.0
+        else:
+            # note: we avoid unnecessary addition or pow operations
+            numerator = self.beta + lengths if self.beta != 0.0 else lengths
+            numerator = numerator ** self.alpha if self.alpha != 1.0 else numerator
+            return numerator / self.denominator
+    
+    def __call__(self, lengths: Union[mx.sym.Variable, int, float]) -> Union[mx.sym.Variable, float]:
+        """
+        Calculate the length penalty for the given vector of lengths.
+
+        :param lengths: A scalar or a matrix of sentence lengths of dimensionality (batch_size, 1).
+        :return: The length penalty. A scalar or a matrix (batch_size, 1) depending on the input.
+        """
+        if self.alpha == 0.0:
+            if isinstance(lengths, mx.sym.Variable):
+                # no length penalty:
+                return mx.sym.ones_like(lengths)
             else:
                 return 1.0
         else:
@@ -982,7 +1064,9 @@ class Translator:
         # then the next block for the 2nd sentence and so on
 
         # sequences: (batch_size * beam_size, output_length), pre-filled with <s> symbols on index 0
-        sequences = mx.nd.full((self.batch_size * self.beam_size, max_output_length), val=C.PAD_ID, ctx=self.context,
+        #sequences = mx.nd.full((self.batch_size * self.beam_size, max_output_length), val=C.PAD_ID, ctx=self.context,
+        #                       dtype='int32')
+        sequences = mx.nd.full((self.batch_size * self.beam_size, 1), val=C.PAD_ID, ctx=self.context,
                                dtype='int32')
         sequences[:, 0] = self.start_id
 
@@ -990,7 +1074,9 @@ class Translator:
         finished = mx.nd.zeros((self.batch_size * self.beam_size,), ctx=self.context, dtype='int32')
 
         # attentions: (batch_size * beam_size, output_length, encoded_source_length)
-        attentions = mx.nd.zeros((self.batch_size * self.beam_size, max_output_length, encoded_source_length),
+        #attentions = mx.nd.zeros((self.batch_size * self.beam_size, max_output_length, encoded_source_length),
+        #                         ctx=self.context)
+        attentions = mx.nd.zeros((self.batch_size * self.beam_size, 1, encoded_source_length),
                                  ctx=self.context)
 
         # best_hyp_indices: row indices of smallest scores (ascending).
@@ -1003,6 +1089,7 @@ class Translator:
         # reset all padding distribution cells to np.inf
         self.pad_dist[:] = np.inf
 
+        pad_dist_dim1_len = len(self.vocab_target)
         # If using a top-k lexicon, select param rows for logit computation that correspond to the
         # target vocab for this sentence.
         models_output_layer_w = list()
@@ -1027,41 +1114,102 @@ class Translator:
 
             pad_dist = mx.nd.full((self.batch_size * self.beam_size, vocab_slice_ids.shape[0]),
                                   val=np.inf, ctx=self.context)
+            pad_dist_dim1_len = vocab_slice_ids.shape[0]
             for m in self.models:
                 models_output_layer_w.append(m.output_layer_w.take(vocab_slice_ids))
                 models_output_layer_b.append(m.output_layer_b.take(vocab_slice_ids))
 
         # (0) encode source sentence, returns a list
         model_states = self._encode(source, source_length)
-
+        
+        #convert decoder states in model states to symbols
+        #sym_model_states = []
+        #for ms in model_states:
+        #    ds_states = []
+        #    for ds in ms.states:
+        #        symbol = mx.sym.Variable('ds')
+        #        ds_states.append(symbol)
+        #    sym_model_states.append(ds_states)
+        
+        
         for t in range(1, max_output_length):
-
+        
             # (1) obtain next predictions and advance models' state
             # scores: (batch_size * beam_size, target_vocab_size)
             # attention_scores: (batch_size * beam_size, bucket_key)
+            #scores, attention_scores, model_states = self._decode_step(sequences,
+            #                                                           t,
+            #                                                           source_length,
+            #                                                           model_states,
+            #                                                           models_output_layer_w,
+            #                                                           models_output_layer_b)
+
             scores, attention_scores, model_states = self._decode_step(sequences,
                                                                        t,
                                                                        source_length,
                                                                        model_states,
                                                                        models_output_layer_w,
                                                                        models_output_layer_b)
-
+            
+            sym_scores = mx.sym.Variable('scores')
+            sym_scores_accumulated = mx.sym.Variable('scores_accumulated')
+            sym_attention_scores = mx.sym.Variable('attention_scores')
+            sym_lengths = mx.sym.Variable('lengths')
+            sym_finished = mx.sym.Variable('finished')
+            sym_pad_dist = mx.sym.Variable('pad_dist')
+            
             # (2) compute length-normalized accumulated scores in place
             if t == 1 and self.batch_size == 1:  # only one hypothesis at t==1
-                scores = scores[:1] / self.length_penalty(lengths[:1])
+                #scores = scores[:1] / self.length_penalty(lengths[:1])
+
+                sym_scores = mx.sym.broadcast_div(sym_scores[:1], self.length_penalty(sym_lengths[:1]))
+                
             else:
                 # renormalize scores by length ...
-                scores = (scores + scores_accumulated * self.length_penalty(lengths - 1)) / self.length_penalty(lengths)
+                #scores = (scores + scores_accumulated * self.length_penalty(lengths - 1)) / self.length_penalty(lengths)
+                sym_scores = mx.sym.broadcast_div(mx.sym.broadcast_add(sym_scores, mx.sym.broadcast_mul(sym_scores_accumulated, self.length_penalty(sym_lengths - 1))), self.length_penalty(sym_lengths))
                 # ... but not for finished hyps.
                 # their predicted distribution is set to their accumulated scores at C.PAD_ID.
-                pad_dist[:, C.PAD_ID] = scores_accumulated[:, 0]
+                #pad_dist[:, C.PAD_ID] = scores_accumulated[:, 0]
+                if C.PAD_ID == 0:
+                    sym_pad_dist = mx.sym.concat(sym_scores_accumulated, mx.sym.slice_axis(sym_pad_dist, 1, 1, pad_dist_dim1_len), dim=1)
+                else:
+                    sym_pad_dist = mx.sym.concat(mx.sym.slice_axis(sym_pad_dist, 1, 0, C.PAD_ID), sym_scores_accumulated, mx.sym.slice_axis(sym_pad_dist, 1, C.PAD_ID, pad_dist_dim1_len), dim=1)
+                
                 # this is equivalent to doing this in numpy:
                 #   pad_dist[finished, :] = np.inf
                 #   pad_dist[finished, C.PAD_ID] = scores_accumulated[finished]
-                scores = mx.nd.where(finished, pad_dist, scores)
+                
+                sym_scores = mx.sym.where(sym_finished, sym_pad_dist, sym_scores)
+                #scores = mx.nd.where(finished, pad_dist, scores)
+
+
+            #Group symbols
+            sym_group = mx.sym.Group([sym_scores, sym_scores_accumulated, sym_attention_scores, sym_lengths, sym_finished, sym_pad_dist])
+            
+            sym_group_executor = sym_group.bind( ctx=self.context, args={'scores': scores,
+                                                                         'scores_accumulated': scores_accumulated,
+                                                                         'attention_scores': attention_scores,
+                                                                         'lengths': lengths,
+                                                                         'finished': finished,
+                                                                         'pad_dist': pad_dist})
+            
+            sym_group_results =  sym_group_executor.forward()
+            
+            # Assign results
+            scores = sym_group_results[0]
+            scores_accumulated = sym_group_results[1]
+            attention_scores = sym_group_results[2]
+            lengths = sym_group_results[3]
+            finished = sym_group_results[4]
+            pad_dist = sym_group_results[5]
+            
 
             # (3) get beam_size winning hypotheses for each sentence block separately
             # TODO(fhieber): once mx.nd.topk is sped-up no numpy conversion necessary anymore.
+            
+            
+            
             scores = scores.asnumpy()  # convert to numpy once to minimize cross-device copying
             for sent in range(self.batch_size):
                 rows = slice(sent * self.beam_size, (sent + 1) * self.beam_size)
@@ -1069,34 +1217,151 @@ class Translator:
                 # TODO we could save some tiny amount of time here by not running smallest_k for a finished sent
                 (best_hyp_indices[rows], best_word_indices[rows]), \
                 scores_accumulated[rows, 0] = utils.smallest_k(sliced_scores, self.beam_size, t == 1)
+                                
                 # offsetting since the returned smallest_k() indices were slice-relative
                 best_hyp_indices[rows] += rows.start
 
             # Map from restricted to full vocab ids if needed
             if self.restrict_lexicon:
                 best_word_indices[:] = vocab_slice_ids.take(best_word_indices)
+            
+            
+            #When unravel index is supported, no necessary numpy converion is required
+            
+            # (3) get beam_size winning hypotheses for each sentence block separately
+            # TODO(fhieber): once mx.nd.topk is sped-up no numpy conversion necessary anymore.
+            
+            #sym_best_hyp_indices = mx.sym.Variable('best_hyp_indices')
+            #sym_best_word_indices = mx.sym.Variable('best_word_indices')
+            #sym_scores_accumulated = mx.sym.Variable('scores_accumulated')
+            #sym_scores = mx.sym.Variable('scores')
+            
+            #scores = scores.asnumpy()  # convert to numpy once to minimize cross-device copying
+            #for sent in range(self.batch_size):
+            #    rows = slice(sent * self.beam_size, (sent + 1) * self.beam_size)
+            #    #sliced_scores = scores if t == 1 and self.batch_size == 1 else scores[rows]
+            #    sym_sliced_scores = sym_scores if t == 1 and self.batch_size == 1 else mx.sym.slice(sym_scores, rows.start, rows.end)
+                
+                
+                # TODO we could save some tiny amount of time here by not running smallest_k for a finished sent
+                #(best_hyp_indices[rows], best_word_indices[rows]), \
+                #scores_accumulated[rows, 0] = utils.sym_smallest_k_mx(sym_sliced_scores, self.beam_size, t == 1)
+            #    (sym_indices0, sym_indices1), \
+            #    sym_values = utils.sym_smallest_k_mx(sym_sliced_scores, self.beam_size, t == 1) 
+                
+            #    s_first = mx.sym.slice_axis(sym_scores_accumulated, 0, 0, rows.start)
+                #s_the_rows =  
+            #    s_end = mx.sym.slice_axis(sym_scores_accumulated, 0, rows.stop, self.batch_size*self.beam_size)
+            #    sym_scores_accumulated = mx.sym.concat(s_first, sym_values, s_end, dim=0)
+                
+                # offsetting since the returned smallest_k() indices were slice-relative
+                #best_hyp_indices[rows] += rows.start
+            #    first = mx.sym.slice(sym_best_hyp_indices, 0, rows.start)
+                #the_rows = mx.sym.slice(sym_best_hyp_indices, rows) + rows.start
+            #    the_rows = mx.sym.full((self.beam_size,), val=(rows.start) , ctx=self.context, dtype='int32')
+            #    the_rows = the_rows + sym_indices0
+            #    end = mx.sym.slice(sym_best_hyp_indices, rows.stop, self.batch_size*self.beam_size)
+            #    sym_best_hyp_indices = mx.sym.concat(first, the_rows, end, dim=0)
+                
+                
+             #   w_first = mx.sym.slice(sym_best_word_indices, 0, rows.start)
+             #   w_the_rows = mx.sym.zeros((self.beam_size,), ctx=self.context, dtype='int32')
+             #   w_the_rows = w_the_rows + sym_indices1
+             #   w_end = mx.sym.slice(sym_best_word_indices, rows.stop, self.batch_size*self.beam_size)
+             #  sym_best_word_indices = mx.sym.concat(w_first, w_the_rows, w_end, dim=0)
+                
+                
+
+             # Map from restricted to full vocab ids if needed
+             #if self.restrict_lexicon:
+             #    best_word_indices[:] = vocab_slice_ids.take(best_word_indices)
+
+
+
+
+
 
             # (4) get hypotheses and their properties for beam_size winning hypotheses (ascending)
-            sequences = mx.nd.take(sequences, best_hyp_indices)
-            lengths = mx.nd.take(lengths, best_hyp_indices)
-            finished = mx.nd.take(finished, best_hyp_indices)
-            attention_scores = mx.nd.take(attention_scores, best_hyp_indices)
-            attentions = mx.nd.take(attentions, best_hyp_indices)
+            
+            
+            #Define symbols
+            
+            sym_scores = mx.sym.Variable('scores')
+            sym_scores_accumulated = mx.sym.Variable('scores_accumulated')
+            
+            sym_best_hyp_indices = mx.sym.Variable('best_hyp_indices')
+            sym_best_word_indices = mx.sym.Variable('best_word_indices')
+            
+            sym_sequences = mx.sym.Variable('sequences')
+            sym_lengths = mx.sym.Variable('lengths')
+            sym_finished = mx.sym.Variable('finished')
+            sym_attention_scores = mx.sym.Variable('attention_scores')
+            sym_attentions = mx.sym.Variable('attentions')
+            
+            #Take operations
+            sym_sequences = mx.sym.take(sym_sequences, sym_best_hyp_indices)
+            sym_lengths = mx.sym.take(sym_lengths, sym_best_hyp_indices)
+            sym_finished = mx.sym.take(sym_finished, sym_best_hyp_indices)
+            sym_attention_scores = mx.sym.take(sym_attention_scores, sym_best_hyp_indices)
+            sym_attentions = mx.sym.take(sym_attentions, sym_best_hyp_indices)
 
             # (5) update best hypotheses, their attention lists and lengths (only for non-finished hyps)
             # pylint: disable=unsupported-assignment-operation
-            sequences[:, t] = best_word_indices
-            attentions[:, t, :] = attention_scores
-            lengths += mx.nd.cast(1 - mx.nd.expand_dims(finished, axis=1), dtype='float32')
+            
+            sym_sequences = mx.sym.concat(sym_sequences, mx.sym.expand_dims(sym_best_word_indices, axis=1), dim=1)
+            sym_attentions = mx.sym.concat(sym_attentions, mx.sym.expand_dims(sym_attention_scores, axis=1), dim=1)
+            sym_lengths = sym_lengths + mx.sym.cast(1 - mx.sym.expand_dims(sym_finished, axis=1), dtype='float32')
+            
 
             # (6) determine which hypotheses in the beam are now finished
-            finished = ((best_word_indices == C.PAD_ID) + (best_word_indices == self.vocab_target[C.EOS_SYMBOL]))
-            if mx.nd.sum(finished).asscalar() == self.batch_size * self.beam_size:  # all finished
+            
+            sym_finished = ((sym_best_word_indices == C.PAD_ID) + (sym_best_word_indices == self.vocab_target[C.EOS_SYMBOL]))
+            #sym_all_finished = mx.sym.Variable('all_finished', dtype='int32')
+            #if mx.sym.sum(sym_finished) == sym_all_finished:  # all finished
+            #    break
+            
+            
+            
+            #Group symbols
+            sym_group = mx.sym.Group([sym_sequences, sym_lengths, sym_finished, sym_attention_scores, sym_attentions])
+            
+            sym_group_executor = sym_group.bind( ctx=self.context, args={'best_hyp_indices': best_hyp_indices,
+                                                                         'best_word_indices': best_word_indices,
+                                                                         'scores': scores,
+                                                                         'scores_accumulated': scores_accumulated,
+                                                                         'sequences': sequences,
+                                                                         'lengths': lengths,
+                                                                         'finished': finished,
+                                                                         #'all_finished': [self.batch_size * self.beam_size],
+                                                                         'attention_scores': attention_scores,
+                                                                         'attentions': attentions})
+            
+            sym_group_results =  sym_group_executor.forward()
+            
+            # Assign results
+            sequences = sym_group_results[0]
+            lengths = sym_group_results[1]
+            finished = sym_group_results[2]
+            attention_scores = sym_group_results[3]
+            attentions = sym_group_results[4]  
+            
+            if mx.nd.sum(finished).asscalar() == self.batch_size * self.beam_size:
                 break
 
             # (7) update models' state with winning hypotheses (ascending)
             for ms in model_states:
                 ms.sort_state(best_hyp_indices)
+                #self.states = [mx.nd.take(ds, best_hyp_indices) for ds in self.states]
+            
+            #for counter, ms in enumerate(sym_model_states):
+            #    for inner_counter, ds in enumerate(ms):
+            #        symbol = mx.sym.take(ds, sym_best_hyp_indices)
+            #        symbol_executor = symbol.bind(self.context, {'best_hyp_indices': best_hyp_indices, 'ds': model_states[counter].states[inner_counter]})
+            #        output = symbol_executor.forward()
+            #        model_states[counter].states[inner_counter] = output[0]
+                
+            
+                
 
         return sequences, attentions, scores_accumulated, lengths
 
