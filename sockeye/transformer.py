@@ -344,7 +344,8 @@ def get_variable_length_bias(lengths: mx.sym.Symbol,
     x = mx.symbol.Custom(data=lengths, max_length=max_length, op_type='variable_length_bias')
     if num_heads is not None:
         # (batch_size, heads, max_length) if fold_heads == False else (batch_size * heads, max_length)
-        x = layers.broadcast_to_heads(x, num_heads, ndim=2, fold_heads=fold_heads)
+        #x = layers.broadcast_to_heads(x, num_heads, ndim=2, fold_heads=fold_heads)
+        x = layers.broadcast_to_heads(x, num_heads, ndim=2, fold_heads=False)
     return mx.sym.BlockGrad(x, name='%sbias' % name)
 
 
