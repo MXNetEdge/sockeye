@@ -1195,25 +1195,28 @@ class Translator:
                                dtype='int32')
         sequences[:, 0] = self.start_id
 
+        update_context = mx.cpu()
+        #update_context = mx.gpu(0)
+
         # Beam history
         if self.store_beam:
             beam_histories = [defaultdict(list) for _ in range(self.batch_size)] # type: Optional[List[BeamHistory]]
         else:
             beam_histories = None
 
-        lengths = mx.nd.ones((self.batch_size * self.beam_size, 1), ctx=self.context)
-        finished = mx.nd.zeros((self.batch_size * self.beam_size,), ctx=self.context, dtype='int32')
+        lengths = mx.nd.ones((self.batch_size * self.beam_size, 1), ctx=update_context)
+        finished = mx.nd.zeros((self.batch_size * self.beam_size,), ctx=update_context, dtype='int32')
 
         # attentions: (batch_size * beam_size, output_length, encoded_source_length)
         attentions = mx.nd.zeros((self.batch_size * self.beam_size, max_output_length, encoded_source_length),
-                                 ctx=self.context)
+                                 ctx=update_context)
 
         # best_hyp_indices: row indices of smallest scores (ascending).
-        best_hyp_indices = mx.nd.zeros((self.batch_size * self.beam_size,), ctx=self.context, dtype='int32')
+        best_hyp_indices = mx.nd.zeros((self.batch_size * self.beam_size,), ctx=update_context, dtype='int32')
         # best_word_indices: column indices of smallest scores (ascending).
-        best_word_indices = mx.nd.zeros((self.batch_size * self.beam_size,), ctx=self.context, dtype='int32')
+        best_word_indices = mx.nd.zeros((self.batch_size * self.beam_size,), ctx=update_context, dtype='int32')
         # scores_accumulated: chosen smallest scores in scores (ascending).
-        scores_accumulated = mx.nd.zeros((self.batch_size * self.beam_size, 1), ctx=self.context)
+        scores_accumulated = mx.nd.zeros((self.batch_size * self.beam_size, 1), ctx=update_context)
 
         # reset all padding distribution cells to np.inf
         self.pad_dist[:] = np.inf
@@ -1229,7 +1232,7 @@ class Translator:
             #       We currently convert source to NumPy and target ids back to NDArray.
             source_words = source.split(num_outputs=self.num_source_factors, axis=2, squeeze_axis=True)[0]
             vocab_slice_ids = mx.nd.array(self.restrict_lexicon.get_trg_ids(source_words.astype("int32").asnumpy()),
-                                          ctx=self.context)
+                                          ctx=update_context)
 
             if vocab_slice_ids.shape[0] < self.beam_size + 1:
                 # This fixes an edge case for toy models, where the number of vocab ids from the lexicon is
@@ -1238,14 +1241,19 @@ class Translator:
                                vocab_slice_ids.shape[0], self.beam_size)
                 n = self.beam_size - vocab_slice_ids.shape[0] + 1
                 vocab_slice_ids = mx.nd.concat(vocab_slice_ids,
-                                               mx.nd.full((n,), val=self.vocab_target[C.EOS_SYMBOL], ctx=self.context),
+                                               mx.nd.full((n,), val=self.vocab_target[C.EOS_SYMBOL], ctx=update_context),
                                                dim=0)
 
             pad_dist = mx.nd.full((self.batch_size * self.beam_size, vocab_slice_ids.shape[0]),
-                                  val=np.inf, ctx=self.context)
+                                  val=np.inf, ctx=update_context)
+            vocab_slice_ids_tmp = vocab_slice_ids.as_in_context(self.context)
             for m in self.models:
-                models_output_layer_w.append(m.output_layer_w.take(vocab_slice_ids))
-                models_output_layer_b.append(m.output_layer_b.take(vocab_slice_ids))
+                models_output_layer_w.append(m.output_layer_w.take(vocab_slice_ids_tmp))
+                models_output_layer_b.append(m.output_layer_b.take(vocab_slice_ids_tmp))
+
+        if self.restrict_lexicon==None:
+          # Dummy array
+          vocab_slice_ids = mx.nd.zeros((1,), ctx=update_context)
 
         # (0) encode source sentence, returns a list
         model_states = self._encode(source, source_length)
@@ -1262,78 +1270,23 @@ class Translator:
                                                                        models_output_layer_w,
                                                                        models_output_layer_b)
 
-            # (2) compute length-normalized accumulated scores in place
-            if t == 1 and self.batch_size == 1:  # only one hypothesis at t==1
-                scores = scores[:1] / self.length_penalty(lengths[:1])
-            else:
-                # renormalize scores by length ...
-                scores = (scores + scores_accumulated * self.length_penalty(lengths - 1)) / self.length_penalty(lengths)
-                # ... but not for finished hyps.
-                # their predicted distribution is set to their accumulated scores at C.PAD_ID.
-                pad_dist[:, C.PAD_ID] = scores_accumulated[:, 0]
-                # this is equivalent to doing this in numpy:
-                #   pad_dist[finished, :] = np.inf
-                #   pad_dist[finished, C.PAD_ID] = scores_accumulated[finished]
-                scores = mx.nd.where(finished, pad_dist, scores)
+            scores = scores.as_in_context(update_context)
+            attention_scores = attention_scores.as_in_context(update_context)
+            sequences = sequences.as_in_context(update_context)
+            done = mx.nd.sockeye_beam_search(sequences, lengths, finished, vocab_slice_ids,
+                                             scores, scores_accumulated, attentions, attention_scores, best_hyp_indices,
+                                             batch_size=self.batch_size, beam_size=self.beam_size,
+                                             pad_id=C.PAD_ID, eos_id=self.vocab_target[C.EOS_SYMBOL],
+                                             step=t, restrict_vocab=(self.restrict_lexicon!=None),
+                                             alpha=self.length_penalty.alpha, beta=self.length_penalty.beta)
 
-            # (3) get beam_size winning hypotheses for each sentence block separately
-            # TODO(fhieber): once mx.nd.topk is sped-up no numpy conversion necessary anymore.
-            scores = scores.asnumpy()  # convert to numpy once to minimize cross-device copying
-            for sent in range(self.batch_size):
-                rows = slice(sent * self.beam_size, (sent + 1) * self.beam_size)
-                sliced_scores = scores if t == 1 and self.batch_size == 1 else scores[rows]
-                # TODO we could save some tiny amount of time here by not running smallest_k for a finished sent
-                (best_hyp_indices[rows], best_word_indices[rows]), \
-                scores_accumulated[rows, 0] = utils.smallest_k(sliced_scores, self.beam_size, t == 1)
-                # offsetting since the returned smallest_k() indices were slice-relative
-                best_hyp_indices[rows] += rows.start
-
-            # Map from restricted to full vocab ids if needed
-            if self.restrict_lexicon:
-                best_word_indices[:] = vocab_slice_ids.take(best_word_indices)
-
-            # (4) get hypotheses and their properties for beam_size winning hypotheses (ascending)
-            sequences = mx.nd.take(sequences, best_hyp_indices)
-            lengths = mx.nd.take(lengths, best_hyp_indices)
-            finished = mx.nd.take(finished, best_hyp_indices)
-            attention_scores = mx.nd.take(attention_scores, best_hyp_indices)
-            attentions = mx.nd.take(attentions, best_hyp_indices)
-
-            # (5) update best hypotheses, their attention lists and lengths (only for non-finished hyps)
-            # pylint: disable=unsupported-assignment-operation
-            sequences[:, t] = best_word_indices
-            attentions[:, t, :] = attention_scores
-            lengths += mx.nd.cast(1 - mx.nd.expand_dims(finished, axis=1), dtype='float32')
-
-
-            # (6) optionally save beam history
-            if self.store_beam:
-                unnormalized_scores = scores_accumulated * self.length_penalty(lengths -1)
-                for sent in range(self.batch_size):
-                    rows = slice(sent * self.beam_size, (sent + 1) * self.beam_size)
-
-                    best_word_indices_sent = best_word_indices[rows].asnumpy().tolist()
-                    # avoid adding columns for finished sentences
-                    if any(x for x in best_word_indices_sent if x != C.PAD_ID):
-                        beam_histories[sent]["predicted_ids"].append(best_word_indices_sent)
-                        beam_histories[sent]["predicted_tokens"].append([self.vocab_target_inv[x] for x in
-                                                                    best_word_indices_sent])
-                        # for later sentences in the matrix, shift from e.g. [5, 6, 7, 8, 6] to [0, 1, 3, 4, 1]
-                        shifted_parents = best_hyp_indices[rows] - (sent * self.beam_size)
-                        beam_histories[sent]["parent_ids"].append(shifted_parents.asnumpy().tolist())
-
-                        beam_histories[sent]["scores"].append(unnormalized_scores[rows].asnumpy().flatten().tolist())
-                        beam_histories[sent]["normalized_scores"].append(scores_accumulated[rows].asnumpy().flatten().tolist())
-
-
-            # (7) determine which hypotheses in the beam are now finished
-            finished = ((best_word_indices == C.PAD_ID) + (best_word_indices == self.vocab_target[C.EOS_SYMBOL]))
-            if mx.nd.sum(finished).asscalar() == self.batch_size * self.beam_size:  # all finished
+            if done.asscalar():  # all finished
                 break
 
             # (8) update models' state with winning hypotheses (ascending)
             for ms in model_states:
-                ms.sort_state(best_hyp_indices)
+                best_hyp_indices_tmp = best_hyp_indices.as_in_context(self.context)
+                ms.sort_state(best_hyp_indices_tmp)
 
         return sequences, attentions, scores_accumulated, lengths, beam_histories
 

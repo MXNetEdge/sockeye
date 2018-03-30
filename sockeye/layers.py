@@ -359,21 +359,64 @@ class MultiHeadAttentionBase:
         :param bias: Optional 3d bias.
         :return: Context vectors. Shape: (batch_size, query_max_length, output_depth).
         """
+        assert lengths is None
+        assert bias is not None
+
         # scale by sqrt(depth_per_head)
         queries = queries * (self.depth_per_head ** -0.5)
 
-        # (batch*heads, length, depth/heads)
-        queries = split_heads(queries, self.depth_per_head, self.heads)
-        keys = split_heads(keys, self.depth_per_head, self.heads)
-        values = split_heads(values, self.depth_per_head, self.heads)
-        lengths = broadcast_to_heads(lengths, self.heads, ndim=1, fold_heads=True) if lengths is not None else lengths
+        ## First batch_dot ##
+        # lhs: QUERIES
+        queries = mx.sym.reshape(data=queries, shape=(0, -1, self.heads, self.depth_per_head))
 
-        # (batch*heads, query_max_length, depth_per_head)
-        contexts = dot_attention(queries, keys, values,
-                                 lengths=lengths, dropout=self.dropout, bias=bias, prefix=self.prefix)
+        # (batch, heads, length, depth/heads)
+        #queries = mx.sym.transpose(data=queries, axes=(0, 2, 1, 3))
+        # (batch * heads, length, depth/heads)
+        #queries = mx.sym.reshape(data=queries, shape=(-3, -1, self.depth_per_head))
+        # rhs: KEYS
+        keys = mx.sym.reshape(data=keys, shape=(0, -1, self.heads, self.depth_per_head))
+        # (batch, heads, length, depth/heads)
+        #keys = mx.sym.transpose(data=keys, axes=(0, 2, 1, 3))
+        # (batch * heads, length, depth/heads)
+        #keys = mx.sym.reshape(data=keys, shape=(-3, -1, self.depth_per_head))
+        # BATCH_DOT (n, lq, lk)
+        #logits = mx.sym.linalg.gemm2(A=queries, B=keys, transpose_b=True, name='%sdot' % self.prefix)
+        #logits = mx.sym.batch_dot(lhs=queries, rhs=keys, transpose_b=True, name='%sdot' % self.prefix)
 
+        logits = mx.sym.linalg.gemm2(A=queries, B=keys, axis=1, transpose_b=True, name='%sdot' % self.prefix)
+
+        #logits = mx.sym.transpose(data=logits, axes=(0, 2, 1, 3))
+        #logits = mx.sym.reshape(data=logits, shape=(-3, 0, 0))
+
+        bias = mx.sym.reshape(data=bias, shape=( -1, 0, 0, 0), reverse=True)
+        #bias = mx.sym.reshape(data=bias, shape=( -1, 0, 0))
+        #bias = mx.sym.reshape(data=bias, shape=(-4, -1, self.heads, 0, 0))
+        #bias = mx.sym.transpose(data=bias, axes=(0, 2, 1, 3))
+
+        logits = mx.sym.broadcast_add(logits, bias, name='%sbias_add' % self.prefix)
+        #logits = mx.sym.reshape(data=logits, shape=(-4, -1, self.heads, 0, 0))
+        #logits = mx.sym.transpose(logits, axes=(0, 2, 1, 3))
+
+        ## Second batch_dot ##
+        # lhs: PROBS
+        probs = mx.sym.softmax(logits, axis=-1)
+        probs = mx.sym.Dropout(probs, p=self.dropout) if self.dropout > 0.0 else probs
+        # rhs: VALUES
+        values = mx.sym.reshape(data=values, shape=(0, -1, self.heads, self.depth_per_head))
+        # (batch, heads, length, depth/heads)
+        #values = mx.sym.transpose(data=values, axes=(0, 2, 1, 3))
+        # (batch * heads, length, depth/heads)
+        #values = mx.sym.reshape(data=values, shape=(-3, -1, self.depth_per_head))
+        # (n, lq, lk) x (n, lk, dv) -> (n, lq, dv)
+        #contexts = mx.sym.batch_dot(lhs=probs, rhs=values, name='%scontexts' % self.prefix)
+        contexts = mx.sym.linalg.gemm2(A=probs, B=values, axis=1, name='%scontexts' % self.prefix)
+
+        # combine heads of contexts
+        # (batch, length, heads, depth_per_head)
+        #contexts = mx.sym.reshape(data=contexts, shape=(-4, -1, self.heads, 0, self.depth_per_head))
+        #contexts = mx.sym.transpose(contexts, axes=(0, 2, 1, 3))
         # (batch, query_max_length, depth)
-        contexts = combine_heads(contexts, self.depth_per_head, self.heads)
+        contexts = mx.sym.reshape(contexts, shape=(-1, 0, self.depth_per_head * self.heads))
 
         # contexts: (batch, query_max_length, output_depth)
         contexts = mx.sym.FullyConnected(data=contexts,
