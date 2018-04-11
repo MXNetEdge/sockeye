@@ -31,7 +31,6 @@ from . import vocab
 
 logger = logging.getLogger(__name__)
 
-
 class InferenceModel(model.SockeyeModel):
     """
     InferenceModel is a SockeyeModel that supports three operations used for inference/decoding:
@@ -986,19 +985,9 @@ class Translator:
                                dtype='int32')
         sequences[:, 0] = self.start_id
 
-
-
-
-
-        update_context = mx.cpu()
-        #update_context = mx.gpu(0)
-
-
-
-
-
-
-
+        #update_context = mx.cpu()
+        update_context = mx.gpu(0)
+        
         lengths = mx.nd.ones((self.batch_size * self.beam_size, 1), ctx=update_context)
         finished = mx.nd.zeros((self.batch_size * self.beam_size,), ctx=update_context, dtype='int32')
 
@@ -1067,23 +1056,25 @@ class Translator:
                                                                        models_output_layer_w,
                                                                        models_output_layer_b)
 
-            scores = scores.as_in_context(update_context)
-            attention_scores = attention_scores.as_in_context(update_context)
-            sequences = sequences.as_in_context(update_context)
+
+            #scores = scores.as_in_context(update_context)
+            #attention_scores = attention_scores.as_in_context(update_context)
+            #sequences = sequences.as_in_context(update_context)
             done = mx.nd.sockeye_beam_search(sequences, lengths, finished, vocab_slice_ids,
                                              scores, scores_accumulated, attentions, attention_scores, best_hyp_indices,
                                              batch_size=self.batch_size, beam_size=self.beam_size,
                                              pad_id=C.PAD_ID, eos_id=self.vocab_target[C.EOS_SYMBOL],
                                              step=t, restrict_vocab=(self.restrict_lexicon!=None),
                                              alpha=self.length_penalty.alpha, beta=self.length_penalty.beta)
-
-            if done.asscalar():  # all finished
+            
+            if np.asscalar(done.asnumpy()):  # all finished
                 break
 
             # (7) update models' state with winning hypotheses (ascending)
             for ms in model_states:
-                best_hyp_indices_tmp = best_hyp_indices.as_in_context(self.context)
-                ms.sort_state(best_hyp_indices_tmp)
+                #best_hyp_indices_tmp = best_hyp_indices.as_in_context(self.context)
+                #ms.sort_state(best_hyp_indices_tmp)
+                ms.sort_state(best_hyp_indices)
 
         return sequences, attentions, scores_accumulated, lengths
 
