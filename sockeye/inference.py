@@ -17,6 +17,7 @@ Code for inference/translation
 import itertools
 import logging
 import os
+from functools import partial
 from typing import Callable, Dict, List, NamedTuple, Optional, Tuple, Union, Set
 
 import mxnet as mx
@@ -1031,6 +1032,13 @@ class Translator:
                 models_output_layer_w.append(m.output_layer_w.take(vocab_slice_ids))
                 models_output_layer_b.append(m.output_layer_b.take(vocab_slice_ids))
 
+        # mxnet implementation is faster on GPUs
+        use_mxnet_topk = self.context != mx.cpu()
+        # offset for hypothesis indices in batch decoding
+        offset = np.repeat(np.arange(0, self.batch_size * self.beam_size, self.beam_size), self.beam_size)
+        topk = partial(utils.topk, k=self.beam_size, batch_size=self.batch_size, offset=offset,
+                       use_mxnet_topk=use_mxnet_topk)
+
         # (0) encode source sentence, returns a list
         model_states = self._encode(source, source_length)
 
@@ -1061,16 +1069,8 @@ class Translator:
                 scores = mx.nd.where(finished, pad_dist, scores)
 
             # (3) get beam_size winning hypotheses for each sentence block separately
-            # TODO(fhieber): once mx.nd.topk is sped-up no numpy conversion necessary anymore.
-            scores = scores.asnumpy()  # convert to numpy once to minimize cross-device copying
-            for sent in range(self.batch_size):
-                rows = slice(sent * self.beam_size, (sent + 1) * self.beam_size)
-                sliced_scores = scores if t == 1 and self.batch_size == 1 else scores[rows]
-                # TODO we could save some tiny amount of time here by not running smallest_k for a finished sent
-                (best_hyp_indices[rows], best_word_indices[rows]), \
-                scores_accumulated[rows, 0] = utils.smallest_k(sliced_scores, self.beam_size, t == 1)
-                # offsetting since the returned smallest_k() indices were slice-relative
-                best_hyp_indices[rows] += rows.start
+            best_hyp_indices[:], best_word_indices[:], scores_accumulated[:, 0] = topk(scores, t=t)
+
 
             # Map from restricted to full vocab ids if needed
             if self.restrict_lexicon:
