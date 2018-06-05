@@ -1035,7 +1035,8 @@ class Translator:
         # mxnet implementation is faster on GPUs
         use_mxnet_topk = self.context != mx.cpu()
         # offset for hypothesis indices in batch decoding
-        offset = np.repeat(np.arange(0, self.batch_size * self.beam_size, self.beam_size), self.beam_size)
+        offset = mx.nd.array(np.repeat(np.arange(0, self.batch_size * self.beam_size, self.beam_size), self.beam_size),
+                                       dtype='int32', ctx=self.context)
         topk = partial(utils.topk, k=self.beam_size, batch_size=self.batch_size, offset=offset,
                        use_mxnet_topk=use_mxnet_topk)
 
