@@ -285,6 +285,36 @@ def topk(scores: mx.nd.NDArray,
         # Offsetting the indices to match the shape of the scores matrix
         best_hyp_indices += offset
     return best_hyp_indices, best_word_indices, values
+    
+def sym_topk(sym_scores: mx.sym.Variable,
+         t: int,
+         k: int,
+         batch_size: int,
+         sym_offset: mx.sym.Variable,
+         use_mxnet_topk: bool,
+         scores_shape: Tuple[int, int]) -> Tuple[mx.sym.Variable, mx.sym.Variable, mx.sym.Variable]:
+
+    """
+    Get the lowest k elements per sentence from a `scores` matrix.
+
+    :param scores: Vocabulary scores for the next beam step. (batch_size * beam_size, target_vocabulary_size)
+    :param t: Time step in the beam search.
+    :param k: The number of smallest scores to return.
+    :param batch_size: Number of sentences being decoded at once.
+    :param offset: Array to add to the hypothesis indices for offsetting in batch decoding.
+    :param use_mxnet_topk: True to use the mxnet implementation or False to use the numpy one.
+    :return: The row indices, column indices and values of the k smallest items in matrix.
+    """
+    folded_scores = sym_scores.reshape((batch_size, k * scores_shape[-1]))
+    values_sym, indices_sym = mx.sym.topk(folded_scores, axis=1, k=k, ret_typ='both', is_ascend=True)
+    indices_sym = mx.sym.cast(indices_sym, 'int32').reshape((-1,))
+    unraveled_sym = mx.sym.split(mx.sym.transpose(mx.sym.cast(mx.sym.unravel_index(indices_sym, shape=scores_shape), dtype='float32')), axis=1, num_outputs=2, squeeze_axis=1)
+    sym_best_hyp_indices = mx.sym.cast(unraveled_sym[0], 'int32')
+    sym_best_word_indices = mx.sym.cast(unraveled_sym[1], 'int32')
+    values_sym = mx.sym.expand_dims(values_sym.reshape((-1,)), axis=1)
+    if batch_size > 1:
+        sym_best_hyp_indices = sym_best_hyp_indices + sym_offset
+    return sym_best_hyp_indices, sym_best_word_indices, values_sym
 
 
 def chunks(some_list: List, n: int) -> Iterable[List]:
