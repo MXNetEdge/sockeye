@@ -726,24 +726,65 @@ class Translator:
                     self.batch_size,
                     self.buckets_source)
         def sym_gen(t):
-            t, tr_vocab_length = t
+
+            t, tr_vocab_length, source_seq_len = t
+            model = self.models[0]
+            #source_seq_len, decode_step = bucket_key
+            source_embed_seq_len = model.embedding_source.get_encoded_seq_len(source_seq_len)
+            source_encoded_seq_len = model.encoder.get_encoded_seq_len(source_embed_seq_len)
+
+            model.decoder.reset()
+            target_prev = mx.sym.Variable(C.TARGET_NAME)
+            states = model.decoder.state_variables(t)
+            state_names = [state.name for state in states]
+
+            # embedding for previous word
+            # (batch_size, num_embed)
+            target_embed_prev, _, _ = model.embedding_target.encode(data=target_prev, data_length=None, seq_len=1)
+
+            # decoder
+            # target_decoded: (batch_size, decoder_depth)
+            (target_decoded,
+             sym_attention_scores,
+             states) = model.decoder.decode_step(t,
+                                                target_embed_prev,
+                                                source_encoded_seq_len,
+                                                *states)
+
+            if model.decoder_return_logit_inputs:
+                # skip output layer in graph
+                decoder_outputs = mx.sym.identity(target_decoded, name=C.LOGIT_INPUTS_NAME)
+            else:
+                # logits: (batch_size, target_vocab_size)
+                logits = model.output_layer(target_decoded)
+                if model.softmax_temperature is not None:
+                    logits /= model.softmax_temperature
+                decoder_outputs = mx.sym.softmax(data=logits, name=C.SOFTMAX_NAME)
+            #out_w = mx.sym.Variable('model_output_layer_w')
+            #out_b = mx.sym.Variable('model_output_layer_b')
+            #if self.restrict_lexicon:
+            #    logits = model.output_layer(decoder_outputs, out_w, out_b)
+            #    decoder_outputs = mx.sym.softmax(logits)
+
+            #Assuming a single model
+            sym_scores = -mx.sym.log(decoder_outputs)
+
             # mxnet implementation is faster on GPUs
             use_mxnet_topk = self.context != mx.cpu()
             sym_offset = mx.sym.Variable('offset')
             topk = partial(utils.sym_topk, k=self.beam_size, batch_size=self.batch_size, sym_offset=sym_offset,
                            use_mxnet_topk=use_mxnet_topk)
-            sym_scores = mx.sym.Variable('scores')
             sym_scores_accumulated = mx.sym.Variable('scores_accumulated')
             sym_best_hyp_indices = mx.sym.Variable('best_hyp_indices')
             sym_best_word_indices = mx.sym.Variable('best_word_indices')
             sym_sequences = mx.sym.Variable('sequences')
             sym_lengths = mx.sym.Variable('lengths')
             sym_finished = mx.sym.Variable('finished')
-            sym_attention_scores = mx.sym.Variable('attention_scores')
             sym_attentions = mx.sym.Variable('attentions')
             sym_pad_dist = mx.sym.Variable('pad_dist')
             sym_vocab_slice_ids = mx.sym.Variable('vocab_slice_ids')
-            sym_vocab_slice_ids = mx.sym.split(mx.sym.transpose(mx.sym.slice_axis(sym_vocab_slice_ids, axis=0, begin=0, end=2)), axis=1, num_outputs=2, squeeze_axis=1)[0]
+            if self.restrict_lexicon:
+                sym_vocab_slice_ids = mx.sym.split(mx.sym.transpose(mx.sym.slice_axis(sym_vocab_slice_ids, axis=0, begin=0, end=2)), axis=1, num_outputs=2, squeeze_axis=1)[0]
 
             # (2) compute length-normalized accumulated scores in place
 
@@ -786,23 +827,24 @@ class Translator:
             # (6) determine which hypotheses in the beam are now finished
             sym_finished = ((sym_best_word_indices == C.PAD_ID) + (sym_best_word_indices == self.vocab_target[C.EOS_SYMBOL]))
             #Group symbols
-            sym_group = mx.sym.Group([sym_scores, sym_scores_accumulated, sym_sequences, sym_lengths, sym_finished, sym_attention_scores, sym_attentions, sym_pad_dist, sym_best_word_indices, sym_best_hyp_indices, sym_vocab_slice_ids])
-            data_names = ['scores', 'scores_accumulated', 'sequences', 'lengths', 'finished', 'attention_scores', 'attentions', 'pad_dist','vocab_slice_ids','offset']
+            sym_group = mx.sym.Group([sym_scores, sym_scores_accumulated, sym_sequences, sym_lengths, sym_finished, sym_attention_scores, sym_attentions, sym_pad_dist, sym_best_word_indices, sym_best_hyp_indices, sym_vocab_slice_ids] + states)
+            data_names = ['scores_accumulated', 'sequences', 'lengths', 'finished', 'attentions', 'pad_dist','vocab_slice_ids','offset', C.TARGET_NAME] + state_names
             label_names = []
 
             return sym_group, data_names, label_names
 
-        self.beam_search_step_module = mx.mod.BucketingModule(sym_gen=sym_gen, default_bucket_key=(1, len(self.vocab_target)), context=self.context)
-        data_shapes = [mx.io.DataDesc(name="scores", shape=(self.batch_size*self.beam_size, len(self.vocab_target)), layout=C.BATCH_MAJOR),
-                       mx.io.DataDesc(name="scores_accumulated", shape=(self.batch_size*self.beam_size, 1), layout=C.BATCH_MAJOR),
+        self.beam_search_step_module = mx.mod.BucketingModule(sym_gen=sym_gen, default_bucket_key=(max_output_length, len(self.vocab_target), self.max_input_length), context=self.context)
+        data_shapes = [mx.io.DataDesc(name="scores_accumulated", shape=(self.batch_size*self.beam_size, 1), layout=C.BATCH_MAJOR),
                        mx.io.DataDesc(name="sequences", shape=(self.batch_size*self.beam_size, max_output_length), layout=C.BATCH_MAJOR, dtype='int32'),
                        mx.io.DataDesc(name="lengths", shape=(self.batch_size*self.beam_size, 1), layout=C.BATCH_MAJOR),
                        mx.io.DataDesc(name="finished", shape=(self.batch_size*self.beam_size, ), layout=C.BATCH_MAJOR, dtype='int32'),
-                       mx.io.DataDesc(name="attention_scores", shape=(self.batch_size*self.beam_size, self.max_input_length), layout=C.BATCH_MAJOR),
                        mx.io.DataDesc(name="attentions", shape=(self.batch_size*self.beam_size, max_output_length, self.max_input_length), layout=C.BATCH_MAJOR),
                        mx.io.DataDesc(name="pad_dist", shape=(self.batch_size*self.beam_size, len(self.vocab_target)), layout=C.BATCH_MAJOR),
                        mx.io.DataDesc(name="vocab_slice_ids", shape=(self.batch_size*self.beam_size, len(self.vocab_target)), layout=C.BATCH_MAJOR),
-                       mx.io.DataDesc(name="offset", shape=(self.batch_size * self.beam_size,), layout=C.BATCH_MAJOR, dtype='int32')]
+                       mx.io.DataDesc(name="offset", shape=(self.batch_size * self.beam_size,), layout=C.BATCH_MAJOR, dtype='int32')] + self.models[0]._get_decoder_data_shapes((self.max_input_length, max_output_length))
+                       #mx.io.DataDesc(name="model_output_layer_w", shape=(self.batch_size * self.beam_size,), layout=C.BATCH_MAJOR),
+                       #mx.io.DataDesc(name="model_output_layer_b", shape=(self.batch_size * self.beam_size,), layout=C.BATCH_MAJOR),
+                       #mx.io.DataDesc(name=C.TARGET_NAME, shape=(self.batch_size * self.beam_size,), layout=C.BATCH_MAJOR, dtype='int32')]
         self.beam_search_step_module.bind(data_shapes=data_shapes, for_training=False, grad_req="null")
         self.beam_search_step_module.init_params(arg_params=self.models[0].params, aux_params=self.models[0].aux_params, allow_missing=False)
 
@@ -1093,7 +1135,7 @@ class Translator:
         models_output_layer_b = list()
         pad_dist = self.pad_dist
         target_vocab_length = len(self.vocab_target)
-        vocab_slice_ids = None  # type: mx.nd.NDArray
+        vocab_slice_ids = None  # type: mx.nd.NDArray 
         if self.restrict_lexicon:
             # TODO: See note in method about migrating to pure MXNet when set operations are supported.
             #       We currently convert source to NumPy and target ids back to NDArray.
@@ -1120,30 +1162,21 @@ class Translator:
         # (0) encode source sentence, returns a list
         model_states = self._encode(source, source_length)
         transposed_vocab = mx.nd.zeros((self.batch_size * self.beam_size, target_vocab_length), ctx=self.context, dtype='float32')
-        transposed_vocab[0,:] = vocab_slice_ids
+        #transposed_vocab[0,:] = vocab_slice_ids
         for t in range(1, max_output_length):
 
-            # (1) obtain next predictions and advance models' state
-            # scores: (batch_size * beam_size, target_vocab_size)
-            # attention_scores: (batch_size * beam_size, bucket_key)
-            scores, attention_scores, model_states = self._decode_step(sequences,
-                                                                       t,
-                                                                       source_length,
-                                                                       model_states,
-                                                                       models_output_layer_w,
-                                                                       models_output_layer_b)
-
-            data_shapes = [mx.io.DataDesc(name="scores", shape=(self.batch_size*self.beam_size, target_vocab_length), layout=C.BATCH_MAJOR),
-                           mx.io.DataDesc(name="scores_accumulated", shape=(self.batch_size*self.beam_size, 1), layout=C.BATCH_MAJOR),
+            data_shapes = [mx.io.DataDesc(name="scores_accumulated", shape=(self.batch_size*self.beam_size, 1), layout=C.BATCH_MAJOR),
                            mx.io.DataDesc(name="sequences", shape=(self.batch_size*self.beam_size, t), layout=C.BATCH_MAJOR, dtype='int32'),
                            mx.io.DataDesc(name="lengths", shape=(self.batch_size*self.beam_size, 1), layout=C.BATCH_MAJOR),
                            mx.io.DataDesc(name="finished", shape=(self.batch_size*self.beam_size, ), layout=C.BATCH_MAJOR, dtype='int32'),
-                           mx.io.DataDesc(name="attention_scores", shape=(self.batch_size*self.beam_size, encoded_source_length), layout=C.BATCH_MAJOR),
                            mx.io.DataDesc(name="attentions", shape=(self.batch_size*self.beam_size, t, encoded_source_length), layout=C.BATCH_MAJOR),
                            mx.io.DataDesc(name="pad_dist", shape=(self.batch_size*self.beam_size, target_vocab_length), layout=C.BATCH_MAJOR),
                            mx.io.DataDesc(name="vocab_slice_ids", shape=(self.batch_size*self.beam_size, target_vocab_length), layout=C.BATCH_MAJOR),
-                           mx.io.DataDesc(name="offset", shape=(self.batch_size * self.beam_size,), layout=C.BATCH_MAJOR, dtype='int32')]
-            data_batch = mx.io.DataBatch(data=[scores, scores_accumulated, sequences, lengths, finished, attention_scores, attentions, pad_dist, transposed_vocab, offset], label=None, bucket_key=(t,target_vocab_length), provide_data=data_shapes)
+                           mx.io.DataDesc(name="offset", shape=(self.batch_size * self.beam_size,), layout=C.BATCH_MAJOR, dtype='int32')] + self.models[0]._get_decoder_data_shapes((source_length,t))
+
+
+
+            data_batch = mx.io.DataBatch(data=[scores_accumulated, sequences, lengths, finished, attentions, pad_dist, transposed_vocab, offset, sequences[:, t-1] ] + model_states[0].states, label=None, bucket_key=(t,target_vocab_length,source_length), provide_data=data_shapes)
             self.beam_search_step_module.forward(data_batch, is_train=False)
             module_outputs = self.beam_search_step_module.get_outputs()
 
@@ -1158,7 +1191,7 @@ class Translator:
             pad_dist = module_outputs[7]
             best_word_indices = module_outputs[8]
             best_hyp_indices = module_outputs[9]
-
+            model_states[0].states = module_outputs[11:]
             if mx.nd.sum(finished).asscalar() == self.batch_size * self.beam_size:  # all finished 
                 break
 
