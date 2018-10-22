@@ -143,7 +143,7 @@ class GRUCoverage(Coverage):
     def __init__(self, coverage_num_hidden: int, layer_normalization: bool) -> None:
         super().__init__()
         self.num_hidden = coverage_num_hidden
-        gru_prefix= "%sgru" % self.prefix
+        gru_prefix = "%sgru" % self.prefix
         if layer_normalization:
             self.gru = rnn.LayerNormPerGateGRUCell(self.num_hidden, prefix=gru_prefix)
         else:
@@ -174,6 +174,7 @@ class GRUCoverage(Coverage):
                 data=mx.sym.expand_dims(data=prev_hidden, axis=1, name="%sexpand_decoder" % self.prefix),
                 axis=1, size=source_seq_len, name="%sbroadcast_decoder" % self.prefix)
 
+            # (batch_size, source_seq_len, 1)
             expanded_att_scores = mx.sym.expand_dims(data=attention_prob_scores,
                                                      axis=2,
                                                      name="%sexpand_attention_scores" % self.prefix)
@@ -226,8 +227,7 @@ class ActivationCoverage(Coverage):
         # optional layer normalization
         self.layer_norm = None
         if layer_normalization and not self.num_hidden != 1:
-            self.layer_norm = layers.LayerNormalization(self.num_hidden,
-                                                        prefix="%snorm" % self.prefix) if layer_normalization else None
+            self.layer_norm = layers.LayerNormalization(prefix="%snorm" % self.prefix)
 
     def on(self, source: mx.sym.Symbol, source_length: mx.sym.Symbol, source_seq_len: int) -> Callable:
         """
@@ -292,7 +292,7 @@ class ActivationCoverage(Coverage):
             updated_coverage = intermediate + attention_hidden + coverage_hidden
 
             if self.layer_norm is not None:
-                updated_coverage = self.layer_norm.normalize(updated_coverage)
+                updated_coverage = self.layer_norm(data=updated_coverage)
 
             # (batch_size, seq_len, coverage_num_hidden)
             coverage = mx.sym.Activation(data=updated_coverage,
@@ -312,7 +312,4 @@ def mask_coverage(coverage: mx.sym.Symbol, source_length: mx.sym.Symbol) -> mx.s
     :param source_length: Source length. Shape: (batch_size,).
     :return: Masked coverage vector. Shape: (batch_size, seq_len, coverage_num_hidden).
     """
-    coverage = mx.sym.SwapAxis(data=coverage, dim1=0, dim2=1)
-    coverage = mx.sym.SequenceMask(data=coverage, use_sequence_length=True, sequence_length=source_length)
-    coverage = mx.sym.SwapAxis(data=coverage, dim1=0, dim2=1)
-    return coverage
+    return mx.sym.SequenceMask(data=coverage, axis=1, use_sequence_length=True, sequence_length=source_length)

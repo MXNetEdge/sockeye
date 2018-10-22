@@ -1,4 +1,4 @@
-# Copyright 2017 Amazon.com, Inc. or its affiliates. All Rights Reserved.
+# Copyright 2017, 2018 Amazon.com, Inc. or its affiliates. All Rights Reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License"). You may not
 # use this file except in compliance with the License. A copy of the License
@@ -22,9 +22,11 @@ EOS_SYMBOL = "</s>"
 UNK_SYMBOL = "<unk>"
 PAD_SYMBOL = "<pad>"
 PAD_ID = 0
+PAD_FORMAT = "<pad%d>"
 TOKEN_SEPARATOR = " "
 VOCAB_SYMBOLS = [PAD_SYMBOL, UNK_SYMBOL, BOS_SYMBOL, EOS_SYMBOL]
-
+# reserve extra space for the EOS or BOS symbol that is added to both source and target
+SPACE_FOR_XOS = 1
 
 ARG_SEPARATOR = ":"
 
@@ -43,11 +45,11 @@ CHAR_SEQ_ENCODER_PREFIX = ENCODER_PREFIX + "char_"
 DEFAULT_OUTPUT_LAYER_PREFIX = "target_output_"
 
 # embedding prefixes
-SOURCE_EMBEDDING_PREFIX = "source_embed_"
-SOURCE_POSITIONAL_EMBEDDING_PREFIX = "source_pos_embed_"
-TARGET_EMBEDDING_PREFIX = "target_embed_"
-TARGET_POSITIONAL_EMBEDDING_PREFIX = "target_pos_embed_"
-SHARED_EMBEDDING_PREFIX = "source_target_embed_"
+SOURCE_EMBEDDING_PREFIX = "source_" + EMBEDDING_PREFIX
+SOURCE_POSITIONAL_EMBEDDING_PREFIX = "source_pos_" + EMBEDDING_PREFIX
+TARGET_EMBEDDING_PREFIX = "target_" + EMBEDDING_PREFIX
+TARGET_POSITIONAL_EMBEDDING_PREFIX = "target_pos_" + EMBEDDING_PREFIX
+SHARED_EMBEDDING_PREFIX = "source_target_" + EMBEDDING_PREFIX
 
 # encoder names (arguments)
 RNN_NAME = "rnn"
@@ -55,9 +57,10 @@ RNN_WITH_CONV_EMBED_NAME = "rnn-with-conv-embed"
 TRANSFORMER_TYPE = "transformer"
 CONVOLUTION_TYPE = "cnn"
 TRANSFORMER_WITH_CONV_EMBED_TYPE = "transformer-with-conv-embed"
+IMAGE_PRETRAIN_TYPE = "image-pretrain-cnn"
 
 # available encoders
-ENCODERS = [RNN_NAME, RNN_WITH_CONV_EMBED_NAME, TRANSFORMER_TYPE, TRANSFORMER_WITH_CONV_EMBED_TYPE, CONVOLUTION_TYPE]
+ENCODERS = [RNN_NAME, RNN_WITH_CONV_EMBED_NAME, TRANSFORMER_TYPE, TRANSFORMER_WITH_CONV_EMBED_TYPE, CONVOLUTION_TYPE, IMAGE_PRETRAIN_TYPE]
 
 # available decoder
 DECODERS = [RNN_NAME, TRANSFORMER_TYPE, CONVOLUTION_TYPE]
@@ -77,16 +80,20 @@ FIXED_POSITIONAL_EMBEDDING = "fixed"
 LEARNED_POSITIONAL_EMBEDDING = "learned"
 POSITIONAL_EMBEDDING_TYPES = [NO_POSITIONAL_EMBEDDING, FIXED_POSITIONAL_EMBEDDING, LEARNED_POSITIONAL_EMBEDDING]
 
-
 DEFAULT_INIT_PATTERN = ".*"
 
 # init types
-INIT_XAVIER='xavier'
-INIT_UNIFORM='uniform'
-INIT_TYPES=[INIT_XAVIER, INIT_UNIFORM]
+INIT_XAVIER = 'xavier'
+INIT_UNIFORM = 'uniform'
+INIT_TYPES = [INIT_XAVIER, INIT_UNIFORM]
+
+INIT_XAVIER_FACTOR_TYPE_IN = "in"
+INIT_XAVIER_FACTOR_TYPE_OUT = "out"
+INIT_XAVIER_FACTOR_TYPE_AVG = "avg"
+INIT_XAVIER_FACTOR_TYPES = [INIT_XAVIER_FACTOR_TYPE_IN, INIT_XAVIER_FACTOR_TYPE_OUT, INIT_XAVIER_FACTOR_TYPE_AVG]
 
 RAND_TYPE_UNIFORM = 'uniform'
-RAND_TYPE_GAUSSIAN= 'gaussian'
+RAND_TYPE_GAUSSIAN = 'gaussian'
 
 # Embedding init types
 EMBED_INIT_PATTERN = '(%s|%s|%s)weight' % (SOURCE_EMBEDDING_PREFIX, TARGET_EMBEDDING_PREFIX, SHARED_EMBEDDING_PREFIX)
@@ -101,7 +108,6 @@ RNN_INIT_ORTHOGONAL_STACKED = 'orthogonal_stacked'
 # use the default initializer used also for all other weights
 RNN_INIT_DEFAULT = 'default'
 
-
 # RNN decoder state init types
 RNN_DEC_INIT_ZERO = "zero"
 RNN_DEC_INIT_LAST = "last"
@@ -111,22 +117,21 @@ RNN_DEC_INIT_CHOICES = [RNN_DEC_INIT_ZERO, RNN_DEC_INIT_LAST, RNN_DEC_INIT_AVG]
 # attention types
 ATT_BILINEAR = 'bilinear'
 ATT_DOT = 'dot'
-ATT_DOT_SCALED = 'dot_scaled'
 ATT_MH_DOT = 'mhdot'
 ATT_FIXED = 'fixed'
 ATT_LOC = 'location'
 ATT_MLP = 'mlp'
 ATT_COV = "coverage"
-ATT_TYPES = [ATT_BILINEAR, ATT_DOT, ATT_DOT_SCALED, ATT_MH_DOT, ATT_FIXED, ATT_LOC, ATT_MLP, ATT_COV]
+ATT_TYPES = [ATT_BILINEAR, ATT_DOT, ATT_MH_DOT, ATT_FIXED, ATT_LOC, ATT_MLP, ATT_COV]
 
 # weight tying components
-WEIGHT_TYING_SRC='src'
-WEIGHT_TYING_TRG='trg'
-WEIGHT_TYING_SOFTMAX='softmax'
+WEIGHT_TYING_SRC = 'src'
+WEIGHT_TYING_TRG = 'trg'
+WEIGHT_TYING_SOFTMAX = 'softmax'
 # weight tying types (combinations of above components):
-WEIGHT_TYING_TRG_SOFTMAX='trg_softmax'
-WEIGHT_TYING_SRC_TRG='src_trg'
-WEIGHT_TYING_SRC_TRG_SOFTMAX='src_trg_softmax'
+WEIGHT_TYING_TRG_SOFTMAX = 'trg_softmax'
+WEIGHT_TYING_SRC_TRG = 'src_trg'
+WEIGHT_TYING_SRC_TRG_SOFTMAX = 'src_trg_softmax'
 
 # default decoder prefixes
 RNN_DECODER_PREFIX = DECODER_PREFIX + "rnn_"
@@ -183,19 +188,33 @@ MONITOR_STAT_FUNCS = {STAT_FUNC_DEFAULT: None,
 DEFAULT_BEAM_SIZE = 5
 CHUNK_SIZE_NO_BATCHING = 1
 CHUNK_SIZE_PER_BATCH_SEGMENT = 500
+BEAM_SEARCH_STOP_FIRST = 'first'
+BEAM_SEARCH_STOP_ALL = 'all'
+
+# Inference Input JSON constants
+JSON_TEXT_KEY = "text"
+JSON_FACTORS_KEY = "factors"
+JSON_CONSTRAINTS_KEY = "constraints"
+JSON_AVOID_KEY = "avoid"
+JSON_ENCODING = "utf-8"
+
+# Lexical constraints
+BANK_ADJUSTMENT = 'even'
 
 VERSION_NAME = "version"
 CONFIG_NAME = "config"
 LOG_NAME = "log"
 JSON_SUFFIX = ".json"
-VOCAB_SRC_NAME = "vocab.src"
-VOCAB_TRG_NAME = "vocab.trg"
+VOCAB_SRC_PREFIX = "vocab.src"
+VOCAB_SRC_NAME = VOCAB_SRC_PREFIX + ".%d" + JSON_SUFFIX
+VOCAB_TRG_PREFIX = "vocab.trg"
+VOCAB_TRG_NAME = VOCAB_TRG_PREFIX + ".%d" + JSON_SUFFIX
 VOCAB_ENCODING = "utf-8"
 PARAMS_PREFIX = "params."
 PARAMS_NAME = PARAMS_PREFIX + "%05d"
 PARAMS_BEST_NAME = "params.best"
 DECODE_OUT_NAME = "decode.output.%05d"
-DECODE_IN_NAME = "decode.source"
+DECODE_IN_NAME = "decode.source.%d"
 DECODE_REF_NAME = "decode.target"
 SYMBOL_NAME = "symbol" + JSON_SUFFIX
 METRICS_NAME = "metrics"
@@ -210,11 +229,10 @@ OPT_STATES_BEST = "mx_optimizer_best.pkl"
 OPT_STATES_INITIAL = "mx_optimizer_initial.pkl"
 BUCKET_ITER_STATE_NAME = "bucket.pkl"
 RNG_STATE_NAME = "rng.pkl"
-MONITOR_STATE_NAME = "monitor.pkl"
 TRAINING_STATE_NAME = "training.pkl"
 SCHEDULER_STATE_NAME = "scheduler.pkl"
 TRAINING_STATE_PARAMS_NAME = "params"
-ARGS_STATE_NAME = "args.json"
+ARGS_STATE_NAME = "args.yaml"
 
 # Arguments that may differ and still resume training
 ARGS_MAY_DIFFER = ["overwrite_output", "use-tensorboard", "quiet",
@@ -232,11 +250,16 @@ INFERENCE_ARG_INPUT_LONG = "--input"
 INFERENCE_ARG_INPUT_SHORT = "-i"
 INFERENCE_ARG_OUTPUT_LONG = "--output"
 INFERENCE_ARG_OUTPUT_SHORT = "-o"
+INFERENCE_ARG_INPUT_FACTORS_LONG = "--input-factors"
+INFERENCE_ARG_INPUT_FACTORS_SHORT = "-if"
 TRAIN_ARGS_MONITOR_BLEU = "--decode-and-evaluate"
 TRAIN_ARGS_CHECKPOINT_FREQUENCY = "--checkpoint-frequency"
 
+# Used to delimit factors on STDIN for inference
+DEFAULT_FACTOR_DELIMITER = '|'
 
 # data layout strings
+BATCH_MAJOR_IMAGE = "NCHW"
 BATCH_MAJOR = "NTC"
 TIME_MAJOR = "TNC"
 
@@ -295,28 +318,46 @@ OUTPUT_HANDLER_TRANSLATION = "translation"
 OUTPUT_HANDLER_TRANSLATION_WITH_SCORE = "translation_with_score"
 OUTPUT_HANDLER_TRANSLATION_WITH_ALIGNMENTS = "translation_with_alignments"
 OUTPUT_HANDLER_TRANSLATION_WITH_ALIGNMENT_MATRIX = "translation_with_alignment_matrix"
+OUTPUT_HANDLER_SCORE = "score"
+OUTPUT_HANDLER_PAIR_WITH_SCORE = "pair_with_score"
 OUTPUT_HANDLER_BENCHMARK = "benchmark"
 OUTPUT_HANDLER_ALIGN_PLOT = "align_plot"
 OUTPUT_HANDLER_ALIGN_TEXT = "align_text"
+OUTPUT_HANDLER_BEAM_STORE = "beam_store"
 OUTPUT_HANDLERS = [OUTPUT_HANDLER_TRANSLATION,
+                   OUTPUT_HANDLER_SCORE,
                    OUTPUT_HANDLER_TRANSLATION_WITH_SCORE,
                    OUTPUT_HANDLER_TRANSLATION_WITH_ALIGNMENTS,
                    OUTPUT_HANDLER_TRANSLATION_WITH_ALIGNMENT_MATRIX,
                    OUTPUT_HANDLER_BENCHMARK,
                    OUTPUT_HANDLER_ALIGN_PLOT,
-                   OUTPUT_HANDLER_ALIGN_TEXT]
+                   OUTPUT_HANDLER_ALIGN_TEXT,
+                   OUTPUT_HANDLER_BEAM_STORE]
+OUTPUT_HANDLERS_SCORING = [OUTPUT_HANDLER_SCORE,
+                           OUTPUT_HANDLER_PAIR_WITH_SCORE]
 
 # metrics
 ACCURACY = 'accuracy'
 PERPLEXITY = 'perplexity'
 BLEU = 'bleu'
 CHRF = 'chrf'
+ROUGE = 'rouge'
+ROUGE1 = 'rouge1'
+ROUGE2 = 'rouge2'
+ROUGEL = 'rougel'
 BLEU_VAL = BLEU + "-val"
 CHRF_VAL = CHRF + "-val"
+ROUGE_VAL = ROUGE + "-val"
+ROUGE_1_VAL = ROUGE1 + "-val"
+ROUGE_2_VAL = ROUGE2 + "-val"
+ROUGE_L_VAL = ROUGEL + "-val"
 AVG_TIME = "avg-sec-per-sent-val"
-METRICS = [PERPLEXITY, ACCURACY, BLEU]
-METRIC_MAXIMIZE = {ACCURACY: True, BLEU: True, PERPLEXITY: False}
-METRIC_WORST = {ACCURACY: 0.0, BLEU: 0.0, PERPLEXITY: np.inf}
+DECODING_TIME = "decode-walltime-val"
+METRICS = [PERPLEXITY, ACCURACY, BLEU, CHRF, ROUGE1]
+METRIC_MAXIMIZE = {ACCURACY: True, BLEU: True, CHRF: True, ROUGE1: True, PERPLEXITY: False}
+METRIC_WORST = {ACCURACY: 0.0, BLEU: 0.0, CHRF: 0.0, ROUGE1: 0.0, PERPLEXITY: np.inf}
+METRICS_REQUIRING_DECODER = [BLEU, CHRF, ROUGE1, ROUGE2, ROUGEL]
+EVALUATE_METRICS = [BLEU, CHRF, ROUGE1, ROUGE2, ROUGEL]
 
 # loss
 CROSS_ENTROPY = 'cross-entropy'
@@ -327,14 +368,49 @@ LOSS_NORM_VALID = "valid"
 TARGET_MAX_LENGTH_FACTOR = 2
 DEFAULT_NUM_STD_MAX_OUTPUT_LENGTH = 2
 
+DTYPE_FP16 = 'float16'
+DTYPE_FP32 = 'float32'
 LARGE_POSITIVE_VALUE = 99999999.
 LARGE_NEGATIVE_VALUE = -LARGE_POSITIVE_VALUE
+LARGE_VALUES = {
+    # Something at the middle of 32768<x<65519. Will be rounded to a multiple of 32.
+    # https://en.wikipedia.org/wiki/Half-precision_floating-point_format#Precision_limitations_on_integer_values
+    DTYPE_FP16: 49152.0,
+
+    # Will be rounded to 1.0e8.
+    # https://en.wikipedia.org/wiki/Single-precision_floating-point_format#Precision_limits_on_integer_values.
+    DTYPE_FP32: LARGE_POSITIVE_VALUE
+}
+
+LHUC_NAME = "lhuc"
+# lhuc application points
+LHUC_ENCODER = "encoder"
+LHUC_DECODER = "decoder"
+LHUC_STATE_INIT = "state_init"
+LHUC_ALL = "all"
+LHUC_CHOICES = [LHUC_ENCODER, LHUC_DECODER, LHUC_STATE_INIT, LHUC_ALL]
 
 # data sharding
 SHARD_NAME = "shard.%05d"
 SHARD_SOURCE = SHARD_NAME + ".source"
 SHARD_TARGET = SHARD_NAME + ".target"
+DATA_INFO = "data.info"
 DATA_CONFIG = "data.config"
 PREPARED_DATA_VERSION_FILE = "data.version"
-PREPARED_DATA_VERSION = 1
+PREPARED_DATA_VERSION = 2
 
+FILL_UP_REPLICATE = 'replicate'
+FILL_UP_ZEROS = 'zeros'
+FILL_UP_DEFAULT = FILL_UP_REPLICATE
+FILL_UP_CHOICES = [FILL_UP_REPLICATE, FILL_UP_ZEROS]
+
+# reranking
+RERANK_BLEU = "bleu"
+RERANK_CHRF = "chrf"
+RERANK_METRICS = [RERANK_BLEU, RERANK_CHRF]
+
+# scoring
+SCORING_TYPE_NEGLOGPROB = 'neglogprob'
+SCORING_TYPE_LOGPROB = 'logprob'
+SCORING_TYPE_DEFAULT = SCORING_TYPE_NEGLOGPROB
+SCORING_TYPE_CHOICES = [SCORING_TYPE_NEGLOGPROB, SCORING_TYPE_LOGPROB]

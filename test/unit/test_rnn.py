@@ -47,7 +47,6 @@ def test_ln_cell(cell, expected_param_keys):
     inputs = [mx.sym.Variable('rnn_t%d_data' % i) for i in range(3)]
     outputs, _ = cell.unroll(3, inputs)
     outputs = mx.sym.Group(outputs)
-    print(sorted(cell.params._params.keys()))
     assert sorted(cell.params._params.keys()) == expected_param_keys
     assert outputs.list_outputs() == ['rnn_t0_out_output', 'rnn_t1_out_output', 'rnn_t2_out_output']
 
@@ -87,6 +86,7 @@ def test_get_stacked_rnn(config, expected_cell):
         cell = cell.base_cell
     assert isinstance(cell, expected_cell)
     assert cell._num_hidden, config.num_hidden
+
 
 def test_cell_parallel_input():
     num_hidden = 128
@@ -131,6 +131,7 @@ def test_cell_parallel_input():
 
     assert np.isclose(out_default_residual.asnumpy(), out_parallel.asnumpy()).all()
 
+
 def test_residual_cell_parallel_input():
     num_hidden = 128
     batch_size = 256
@@ -156,7 +157,9 @@ def test_residual_cell_parallel_input():
     input_nd = mx.nd.random_uniform(shape=input_shape)
     states_nd = mx.nd.random_uniform(shape=states_shape)
     parallel_nd = mx.nd.random_uniform(shape=parallel_shape)
-    arg_shapes, _, _ = default_residual_output.infer_shape(input=input_shape, states=states_shape, parallel=parallel_shape)
+    arg_shapes, _, _ = default_residual_output.infer_shape(input=input_shape,
+                                                           states=states_shape,
+                                                           parallel=parallel_shape)
     params_with_shapes = filter(lambda a: a[0].startswith("params_"),
                                 [x for x in zip(default_residual_output.list_arguments(), arg_shapes)]
                                 )
@@ -174,6 +177,7 @@ def test_residual_cell_parallel_input():
                                              **params_nd)[0]
 
     assert np.isclose(out_default_residual.asnumpy(), out_parallel.asnumpy()).all()
+
 
 def test_sequential_rnn_cell_parallel_input():
     num_hidden = 128

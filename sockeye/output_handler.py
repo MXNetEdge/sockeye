@@ -11,8 +11,9 @@
 # express or implied. See the License for the specific language governing
 # permissions and limitations under the License.
 
-from abc import ABC, abstractmethod
+import json
 import sys
+from abc import ABC, abstractmethod
 from typing import Optional
 
 import sockeye.constants as C
@@ -22,8 +23,8 @@ from sockeye.utils import plot_attention, print_attention_text, get_alignments
 
 
 def get_output_handler(output_type: str,
-                       output_fname: Optional[str],
-                       sure_align_threshold: float) -> 'OutputHandler':
+                       output_fname: Optional[str] = None,
+                       sure_align_threshold: float = 1.0) -> 'OutputHandler':
     """
 
     :param output_type: Type of output handler.
@@ -35,6 +36,10 @@ def get_output_handler(output_type: str,
     output_stream = sys.stdout if output_fname is None else data_io.smart_open(output_fname, mode='w')
     if output_type == C.OUTPUT_HANDLER_TRANSLATION:
         return StringOutputHandler(output_stream)
+    elif output_type == C.OUTPUT_HANDLER_SCORE:
+        return ScoreOutputHandler(output_stream)
+    elif output_type == C.OUTPUT_HANDLER_PAIR_WITH_SCORE:
+        return PairWithScoreOutputHandler(output_stream)
     elif output_type == C.OUTPUT_HANDLER_TRANSLATION_WITH_SCORE:
         return StringWithScoreOutputHandler(output_stream)
     elif output_type == C.OUTPUT_HANDLER_TRANSLATION_WITH_ALIGNMENTS:
@@ -47,6 +52,8 @@ def get_output_handler(output_type: str,
         return AlignPlotHandler(plot_prefix="align" if output_fname is None else output_fname)
     elif output_type == C.OUTPUT_HANDLER_ALIGN_TEXT:
         return AlignTextHandler(sure_align_threshold)
+    elif output_type == C.OUTPUT_HANDLER_BEAM_STORE:
+        return BeamStoringHandler(output_stream)
     else:
         raise ValueError("unknown output type")
 
@@ -116,6 +123,54 @@ class StringWithScoreOutputHandler(OutputHandler):
         self.stream.flush()
 
 
+class ScoreOutputHandler(OutputHandler):
+    """
+    Output handler to write translation score to a stream.
+
+    :param stream: Stream to write translations to (e.g., sys.stdout).
+    """
+
+    def __init__(self, stream):
+        self.stream = stream
+
+    def handle(self,
+               t_input: inference.TranslatorInput,
+               t_output: inference.TranslatorOutput,
+               t_walltime: float = 0.):
+        """
+        :param t_input: Translator input.
+        :param t_output: Translator output.
+        :param t_walltime: Total walltime for translation.
+        """
+        self.stream.write("{:.3f}\n".format(t_output.score))
+        self.stream.flush()
+
+
+class PairWithScoreOutputHandler(OutputHandler):
+    """
+    Output handler to write translation score along with sentence input and output (tab-delimited).
+
+    :param stream: Stream to write translations to (e.g., sys.stdout).
+    """
+
+    def __init__(self, stream):
+        self.stream = stream
+
+    def handle(self,
+               t_input: inference.TranslatorInput,
+               t_output: inference.TranslatorOutput,
+               t_walltime: float = 0.):
+        """
+        :param t_input: Translator input.
+        :param t_output: Translator output.
+        :param t_walltime: Total walltime for translation.
+        """
+        self.stream.write("{:.3f}\t{}\t{}\n".format(t_output.score,
+                                                    C.TOKEN_SEPARATOR.join(t_input.tokens),
+                                                    t_output.translation))
+        self.stream.flush()
+
+
 class StringWithAlignmentsOutputHandler(StringOutputHandler):
     """
     Output handler to write translations and alignments to a stream. Translation and alignment string
@@ -179,8 +234,8 @@ class StringWithAlignmentMatrixOutputHandler(StringOutputHandler):
         :param t_output: Translator output.
         :param t_walltime: Total wall-clock time for translation.
         """
-        line = "{sent_id:d} ||| {target} ||| {score:f} ||| {source} ||| {source_len:d} ||| {target_len:d}\n"
-        self.stream.write(line.format(sent_id=t_input.id,
+        line = "{sent_id} ||| {target} ||| {score:f} ||| {source} ||| {source_len:d} ||| {target_len:d}\n"
+        self.stream.write(line.format(sent_id=t_input.sentence_id,
                                       target=" ".join(t_output.tokens),
                                       score=t_output.score,
                                       source=" ".join(t_input.tokens),
@@ -211,7 +266,7 @@ class BenchmarkOutputHandler(StringOutputHandler):
         :param t_walltime: Total walltime for translation.
         """
         self.stream.write("input=%s\toutput=%s\tinput_tokens=%d\toutput_tokens=%d\ttranslation_time=%0.4f\n" %
-                          (t_input.sentence,
+                          (" ".join(t_input.tokens),
                            t_output.translation,
                            len(t_input.tokens),
                            len(t_output.tokens),
@@ -241,7 +296,7 @@ class AlignPlotHandler(OutputHandler):
         plot_attention(t_output.attention_matrix,
                        t_input.tokens,
                        t_output.tokens,
-                       "%s_%d.png" % (self.plot_prefix, t_input.id))
+                       "%s_%s.png" % (self.plot_prefix, t_input.sentence_id))
 
 
 class AlignTextHandler(OutputHandler):
@@ -267,3 +322,33 @@ class AlignTextHandler(OutputHandler):
                              t_input.tokens,
                              t_output.tokens,
                              self.threshold)
+
+
+class BeamStoringHandler(OutputHandler):
+    """
+    Output handler to store beam histories in JSON format.
+
+    :param stream: Stream to write translations to (e.g. sys.stdout).
+    """
+
+    def __init__(self, stream):
+        self.stream = stream
+
+    def handle(self,
+               t_input: inference.TranslatorInput,
+               t_output: inference.TranslatorOutput,
+               t_walltime: float = 0.):
+        """
+        :param t_input: Translator input.
+        :param t_output: Translator output.
+        :param t_walltime: Total wall-clock time for translation.
+        """
+        assert len(t_output.beam_histories) >= 1, "Translator output should contain beam histories."
+        # If the sentence was max_len split, we may have more than one history
+        for h in t_output.beam_histories:
+            # Add the number of steps in each beam
+            h["number_steps"] = len(h["predicted_tokens"])  # type: ignore
+            # Some outputs can have more than one beam, add the id for bookkeeping
+            h["id"] = t_output.sentence_id  # type: ignore
+            self.stream.write("%s\n" % json.dumps(h, sort_keys=True))
+        self.stream.flush()

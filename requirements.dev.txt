@@ -1,7 +1,0 @@
-pytest
-pytest-cov
-check-manifest
-matplotlib
-mypy
-pylint
-twine

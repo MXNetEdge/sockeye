@@ -22,12 +22,13 @@ from typing import Dict, List
 import mxnet as mx
 import numpy as np
 
-from sockeye.log import setup_main_logger, log_sockeye_version
 from . import arguments
 from . import constants as C
 from . import utils
+from .log import setup_main_logger, log_sockeye_version
 
 logger = setup_main_logger(__name__, console=True, file_logging=False)
+
 
 def _extract(param_names: List[str],
              params: Dict[str, mx.nd.NDArray],
@@ -44,7 +45,7 @@ def _extract(param_names: List[str],
     for name in param_names:
         if name in params:
             logger.info("\tFound '%s': shape=%s", name, str(params[name].shape))
-            ext_params[name] = params[name].asnumpy() 
+            ext_params[name] = params[name].asnumpy()
             remaining_param_names.remove(name)
     return remaining_param_names
 
@@ -63,7 +64,7 @@ def extract(param_path: str,
     logger.info("Loading parameters from '%s'", param_path)
     arg_params, aux_params = utils.load_params(param_path)
 
-    ext_params = {} # type: Dict[str, np.ndarray]
+    ext_params = {}  # type: Dict[str, np.ndarray]
     param_names = _extract(param_names, arg_params, ext_params)
     param_names = _extract(param_names, aux_params, ext_params)
 
@@ -91,20 +92,24 @@ def main():
     """
     Commandline interface to extract parameters.
     """
-    log_sockeye_version(logger)
     params = argparse.ArgumentParser(description="Extract specific parameters.")
     arguments.add_extract_args(params)
     args = params.parse_args()
+    extract_parameters(args)
+
+
+def extract_parameters(args: argparse.Namespace):
+    log_sockeye_version(logger)
 
     if os.path.isdir(args.input):
         param_path = os.path.join(args.input, C.PARAMS_BEST_NAME)
     else:
         param_path = args.input
     ext_params = extract(param_path, args.names, args.list_all)
-    
+
     if len(ext_params) > 0:
-        utils.check_condition(args.output != None, "An output filename must be specified. (Use --output)")
-        logger.info("Writting extracted parameters to '%s'", args.output)
+        utils.check_condition(args.output is not None, "An output filename must be specified. (Use --output)")
+        logger.info("Writing extracted parameters to '%s'", args.output)
         np.savez_compressed(args.output, **ext_params)
 
 

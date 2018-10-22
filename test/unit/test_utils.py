@@ -11,15 +11,19 @@
 # express or implied. See the License for the specific language governing
 # permissions and limitations under the License.
 
-import os
-import tempfile
-
+import gzip
 import math
+import os
+import re
+import tempfile
+from tempfile import TemporaryDirectory
+
 import mxnet as mx
 import numpy as np
 import pytest
 
 from sockeye import __version__
+from sockeye import constants as C
 from sockeye import utils
 
 
@@ -201,6 +205,16 @@ def test_check_version_checks_major():
     assert "Given major version (%s) does not match major code version (%s)" % (version, __version__) == str(e.value)
 
 
+def test_version_matches_changelog():
+    """
+    Tests whether the last version mentioned in CHANGELOG.md matches the sockeye version (sockeye/__init__.py).
+    """
+    pattern = re.compile(r'''## \[([0-9.]+)\]''')
+    changelog = open(os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), "CHANGELOG.md")).read()
+    last_changelog_version = pattern.findall(changelog)[0]
+    assert __version__ == last_changelog_version
+
+
 @pytest.mark.parametrize("samples,expected_mean, expected_variance",
                          [
                              ([1, 2], 1.5, 0.25),
@@ -308,3 +322,74 @@ def test_print_value():
     executor_base.backward()
     executor_print.backward()
     assert np.isclose(executor_base.grad_arrays[1].asnumpy(), executor_print.grad_arrays[1].asnumpy()).all()
+
+
+@pytest.mark.parametrize("new, old, metric, result",
+                         [(0, 0, C.PERPLEXITY, False),
+                          (1.0, 1.0, C.PERPLEXITY, False),
+                          (1.0, 0.9, C.PERPLEXITY, False),
+                          (0.99, 1.0, C.PERPLEXITY, True),
+                          (C.LARGE_POSITIVE_VALUE, np.inf, C.PERPLEXITY, True),
+                          (0, 0, C.BLEU, False),
+                          (1.0, 1.0, C.BLEU, False),
+                          (1.0, 0.9, C.BLEU, True),
+                          (0.99, 1.0, C.BLEU, False),
+                          (C.LARGE_POSITIVE_VALUE, np.inf, C.BLEU, False),
+                         ])
+def test_metric_value_is_better(new, old, metric, result):
+    assert utils.metric_value_is_better(new, old, metric) == result
+
+
+@pytest.mark.parametrize("num_factors", [1, 2, 3])
+def test_split(num_factors):
+    batch_size = 4
+    bucket_key = 10
+    # Simulates splitting factored input
+    data = mx.nd.random.normal(shape=(batch_size, bucket_key, num_factors))
+    result = utils.split(data, num_outputs=num_factors, axis=2, squeeze_axis=True)
+    assert isinstance(result, list)
+    assert result[0].shape == (batch_size, bucket_key)
+
+
+def test_get_num_gpus():
+    assert utils.get_num_gpus() >= 0
+
+
+def _touch_file(fname, compressed: bool, empty: bool) -> str:
+    if compressed:
+        open_func = gzip.open
+    else:
+        open_func = open
+    with open_func(fname, encoding='utf8', mode='wt') as f:
+        if not empty:
+            for i in range(10):
+                print(str(i), file=f)
+    return fname
+
+
+def test_is_gzip_file():
+    with TemporaryDirectory() as temp:
+        fname = os.path.join(temp, 'test')
+        assert utils.is_gzip_file(_touch_file(fname, compressed=True, empty=True))
+        assert utils.is_gzip_file(_touch_file(fname, compressed=True, empty=False))
+        assert not utils.is_gzip_file(_touch_file(fname, compressed=False, empty=True))
+        assert not utils.is_gzip_file(_touch_file(fname, compressed=False, empty=False))
+
+
+def test_smart_open_without_suffix():
+    with TemporaryDirectory() as temp:
+        fname = os.path.join(temp, 'test')
+        _touch_file(fname, compressed=True, empty=False)
+        with utils.smart_open(fname) as fin:
+            assert len(fin.readlines()) == 10
+        _touch_file(fname, compressed=False, empty=False)
+        with utils.smart_open(fname) as fin:
+            assert len(fin.readlines()) == 10
+
+
+@pytest.mark.parametrize("data,expected_lengths", [
+    (mx.nd.array([[1, 2, 0], [1, 0, 0], [0, 0, 0]]), mx.nd.array([2, 1, 0]))
+])
+def test_compute_lengths(data, expected_lengths):
+    lengths = utils.compute_lengths(mx.sym.Variable('data')).eval(data=data)[0]
+    assert (lengths.asnumpy() == expected_lengths.asnumpy()).all()

@@ -97,7 +97,7 @@ LOGGING_CONFIGS = {
 }
 
 
-def _is_python34() -> bool:
+def is_python34() -> bool:
     version = sys.version_info
     return version[0] == 3 and version[1] == 4
 
@@ -125,7 +125,7 @@ def setup_main_logger(name: str, file_logging=True, console=True, path: Optional
     logger = logging.getLogger(name)
 
     def exception_hook(exc_type, exc_value, exc_traceback):
-        if _is_python34():
+        if is_python34():
             # Python3.4 does not seem to handle logger.exception() well
             import traceback
             traceback = "".join(traceback.format_tb(exc_traceback)) + exc_type.name
@@ -139,14 +139,14 @@ def setup_main_logger(name: str, file_logging=True, console=True, path: Optional
 
 
 def log_sockeye_version(logger):
-    from sockeye import __version__
+    from sockeye import __version__, __file__
     try:
         from sockeye.git_version import git_hash
     except ImportError:
         git_hash = "unknown"
-    logger.info("Sockeye version %s commit %s", __version__, git_hash)
+    logger.info("Sockeye version %s, commit %s, path %s", __version__, git_hash, __file__)
 
 
 def log_mxnet_version(logger):
-    from mxnet import __version__
-    logger.info("MXNet version %s", __version__)
+    from mxnet import __version__, __file__
+    logger.info("MXNet version %s, path %s", __version__, __file__)
